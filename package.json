@@ -1,6 +1,6 @@
 {
   "name": "mcp-rewatch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server that enables Claude Code to manage long-running development processes",
   "main": "dist/index.js",
   "bin": {

@@ -71,13 +71,19 @@ export class ProcessManager {
       const proc = spawn(managed.config.command, managed.config.args, {
         cwd: managed.config.cwd || process.cwd(),
         env,
-        shell: false  // Don't use shell to avoid shell syntax issues
+        shell: false,  // Don't use shell to avoid shell syntax issues
+        detached: process.platform !== 'win32'  // Create new process group on Unix-like systems
       })
 
       managed.process = proc
       managed.pid = proc.pid
       managed.startTime = new Date()
-      managed.status = 'running'
+      
+      // Listen for spawn event to confirm successful start
+      proc.once('spawn', () => {
+        managed.status = 'running'
+        managed.logBuffer.add(`[system] Process started successfully (PID: ${proc.pid})`)
+      })
 
       proc.stdout?.on('data', (data) => {
         const lines = data.toString().split('\n').filter(Boolean)
@@ -89,21 +95,53 @@ export class ProcessManager {
         lines.forEach((line: string) => managed.logBuffer.add(`[stderr] ${line}`))
       })
 
-      proc.on('error', (error) => {
+      proc.on('error', (error: any) => {
         managed.status = 'error'
-        managed.error = error.message
-        managed.logBuffer.add(`[error] Process error: ${error.message}`)
+        
+        // Provide specific error messages based on error code
+        if (error.code === 'ENOENT') {
+          managed.error = `Command not found: ${managed.config.command}`
+          managed.logBuffer.add(`[error] Command '${managed.config.command}' not found. Check if it's installed and in PATH.`)
+        } else if (error.code === 'EACCES') {
+          managed.error = `Permission denied: ${managed.config.command}`
+          managed.logBuffer.add(`[error] Permission denied executing '${managed.config.command}'. Check file permissions.`)
+        } else if (error.code === 'ENOTDIR') {
+          managed.error = `Invalid working directory: ${managed.config.cwd}`
+          managed.logBuffer.add(`[error] Working directory '${managed.config.cwd}' is not a directory.`)
+        } else if (error.code === 'EMFILE') {
+          managed.error = 'Too many open files'
+          managed.logBuffer.add('[error] Too many open files. System limit reached.')
+        } else {
+          managed.error = error.message
+          managed.logBuffer.add(`[error] Process error: ${error.message} (${error.code || 'unknown code'})`)
+        }
       })
 
       proc.on('exit', (code, signal) => {
         managed.status = 'stopped'
         managed.pid = undefined
-        managed.logBuffer.add(`[exit] Process exited with code ${code} and signal ${signal}`)
+        
+        if (signal) {
+          managed.logBuffer.add(`[exit] Process terminated by signal ${signal}`)
+        } else if (code === 0) {
+          managed.logBuffer.add('[exit] Process exited successfully (code 0)')
+        } else {
+          managed.logBuffer.add(`[exit] Process exited with code ${code}`)
+        }
       })
 
-    } catch (error) {
+    } catch (error: any) {
       managed.status = 'error'
-      managed.error = error instanceof Error ? error.message : String(error)
+      
+      // Handle spawn errors that might be thrown synchronously
+      if (error.code === 'ENOENT') {
+        managed.error = `Command not found: ${managed.config.command}`
+        managed.logBuffer.add(`[error] Failed to spawn process: command '${managed.config.command}' not found`)
+      } else {
+        managed.error = error instanceof Error ? error.message : String(error)
+        managed.logBuffer.add(`[error] Failed to spawn process: ${managed.error}`)
+      }
+      
       throw error
     }
   }
@@ -114,28 +152,58 @@ export class ProcessManager {
       return
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const proc = managed.process!
       let killed = false
+      let forceKillTimer: NodeJS.Timeout
 
-      const cleanup = () => {
+      const cleanup = (reason: string) => {
         if (!killed) {
           killed = true
+          clearTimeout(forceKillTimer)
           managed.process = undefined
           managed.pid = undefined
           managed.status = 'stopped'
+          managed.logBuffer.add(`[system] Process stopped: ${reason}`)
           resolve()
         }
       }
 
-      proc.once('exit', cleanup)
+      proc.once('exit', () => cleanup('graceful shutdown'))
+      
+      // Send SIGTERM for graceful shutdown
+      try {
+        // On Unix-like systems, kill the entire process group
+        if (process.platform !== 'win32' && proc.pid) {
+          process.kill(-proc.pid, 'SIGTERM')
+          managed.logBuffer.add(`[system] Sent SIGTERM signal to process group ${proc.pid}`)
+        } else {
+          proc.kill('SIGTERM')
+          managed.logBuffer.add('[system] Sent SIGTERM signal for graceful shutdown')
+        }
+      } catch (error: any) {
+        managed.logBuffer.add(`[error] Failed to send SIGTERM: ${error.message}`)
+        cleanup('kill failed')
+        return
+      }
 
-      proc.kill('SIGTERM')
-
-      setTimeout(() => {
+      // Force kill after timeout (5 seconds)
+      forceKillTimer = setTimeout(() => {
         if (!killed) {
-          proc.kill('SIGKILL')
-          setTimeout(cleanup, 1000)
+          managed.logBuffer.add('[warning] Process did not respond to SIGTERM within 5 seconds, sending SIGKILL')
+          try {
+            // Kill entire process group on Unix-like systems
+            if (process.platform !== 'win32' && proc.pid) {
+              process.kill(-proc.pid, 'SIGKILL')
+              managed.logBuffer.add(`[system] Sent SIGKILL to process group ${proc.pid}`)
+            } else {
+              proc.kill('SIGKILL')
+            }
+          } catch (error: any) {
+            managed.logBuffer.add(`[error] Failed to send SIGKILL: ${error.message}`)
+          }
+          // Give it another second after SIGKILL
+          setTimeout(() => cleanup('force killed'), 1000)
         }
       }, 5000)
     })
@@ -163,5 +231,10 @@ export class ProcessManager {
       startTime: managed.startTime,
       error: managed.error
     }))
+  }
+  
+  // Expose processes for emergency cleanup
+  getProcesses(): Map<string, ManagedProcess> {
+    return this.processes
   }
 }

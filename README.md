@@ -83,7 +83,7 @@ The `startupDelay` should be tuned based on your specific processes:
       "command": "pnpm",
       "args": ["dlx", "convex", "dev"],
       "cwd": "./",
-      "startupDelay": 5000  // Convex needs more time to start
+      "startupDelay": 5000
     },
     "nextjs": {
       "command": "pnpm",
@@ -92,7 +92,17 @@ The `startupDelay` should be tuned based on your specific processes:
       "env": {
         "PORT": "3000"
       },
-      "startupDelay": 4000  // Next.js startup time
+      "startupDelay": 4000 
+    },
+    "backend": {
+      "command": "npm",
+      "args": ["run", "dev"],
+      "cwd": "./backend",
+      "env": {
+        "NODE_ENV": "development",
+        "PORT": "8080"
+      },
+      "startupDelay": 2000
     }
   }
 }
@@ -102,7 +112,7 @@ The `startupDelay` should be tuned based on your specific processes:
 
 - **command**: The executable to run (e.g., `npm`, `pnpm`, `node`)
 - **args**: Array of command arguments
-- **cwd**: Working directory for the process (relative to where MCP server runs)
+- **cwd**: Working directory for the process (relative to where MCP server runs, i.e., your project root)
 - **env**: Additional environment variables (optional)
 - **startupDelay**: Time in milliseconds to wait after starting before checking status (default: 3000)
 - **readyPattern**: (Not implemented yet - see roadmap)
@@ -113,45 +123,62 @@ The `startupDelay` should be tuned based on your specific processes:
 
 1. Add MCP Rewatch to Claude Code:
 ```bash
-# Option A: Add for a specific project (recommended)
-claude mcp add rewatch "npx mcp-rewatch" --cwd /path/to/your/project
+# Using npx (no installation needed)
+claude mcp add rewatch npx -- mcp-rewatch
 
-# Option B: Add without cwd (will use Claude Code's launch directory)
-claude mcp add rewatch "npx mcp-rewatch"
+# Or if installed globally
+claude mcp add rewatch mcp-rewatch
+
+# Or for local development
+claude mcp add rewatch node -- /path/to/mcp-rewatch/dist/index.js
 ```
 
 2. Create `rewatch.config.json` in your project root
 
-3. Start Claude Code - MCP Rewatch will look for the config in the specified directory
+3. Start Claude Code from your project directory - MCP Rewatch will look for the config in the current working directory
 
 ### User-Scoped Setup (Global Access)
 
 To make MCP Rewatch available in all Claude Code sessions:
 
 ```bash
-claude mcp add --user rewatch "npx mcp-rewatch" --cwd /path/to/default/project
+claude mcp add -s user rewatch npx -- mcp-rewatch
 ```
 
-**Important**: Even with `--user` scope, you still need to specify a `--cwd`. The server will only work with that specific project unless you use multiple entries or future v2.0 features.
+**Important**: The server looks for `rewatch.config.json` in the current working directory where Claude Code is running. Each project needs its own config file.
 
 ### Managing Multiple Projects
 
-**Current Limitation**: MCP servers have a fixed working directory set at launch time. This means:
-- Each project needs its own MCP server entry with the correct `--cwd`
-- Or you need to edit the configuration when switching projects
-- The server doesn't know which project you're currently working on in Claude Code
+**How it works**: MCP Rewatch looks for `rewatch.config.json` in the current working directory where Claude Code is running.
 
-**Workaround Options**:
+**Best practices**:
 
-1. **Multiple server entries** (recommended for now):
-```bash
-claude mcp add rewatch-app1 "npx mcp-rewatch" --cwd /path/to/app1
-claude mcp add rewatch-app2 "npx mcp-rewatch" --cwd /path/to/app2
+1. **Keep configs project-specific**: Each project should have its own `rewatch.config.json`
+2. **Use relative paths**: In your config, use relative `cwd` paths like `"./backend"` or `"./frontend"`
+3. **Launch Claude Code from project root**: Always start Claude Code from your project directory
+
+**Example multi-service config**:
+```json
+{
+  "processes": {
+    "frontend": {
+      "command": "npm",
+      "args": ["run", "dev"],
+      "cwd": "./frontend"
+    },
+    "backend": {
+      "command": "npm",
+      "args": ["run", "dev"],
+      "cwd": "./backend"
+    },
+    "database": {
+      "command": "docker",
+      "args": ["compose", "up", "postgres"],
+      "cwd": "./"
+    }
+  }
+}
 ```
-
-2. **Single entry with manual config updates** when switching projects
-
-**Coming in v2.0**: Project-aware tools that accept a project path parameter, eliminating the need for multiple entries.
 
 ## Available Tools
 
@@ -271,14 +298,12 @@ pnpm build
 
 For development, you can point Claude Code directly to the built output:
 
-```json
-{
-  "mcpServers": {
-    "rewatch-dev": {
-      "command": "node",
-      "args": ["/path/to/mcp-rewatch/dist/index.js"],
-      "cwd": "/path/to/test/project"
-    }
-  }
-}
+```bash
+# Build the project
+pnpm build
+
+# Add to Claude Code
+claude mcp add rewatch-dev node -- /path/to/mcp-rewatch/dist/index.js
 ```
+
+Then create a `rewatch.config.json` in whatever directory you're testing from.
