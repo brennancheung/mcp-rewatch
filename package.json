@@ -1,0 +1,41 @@
+{
+  "name": "mcp-rewatch",
+  "version": "1.0.0",
+  "description": "MCP server that enables Claude Code to manage long-running development processes",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-rewatch": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "prepublishOnly": "pnpm build",
+    "test": "pnpm build && cd test && node verify.js"
+  },
+  "keywords": ["mcp", "modelcontextprotocol", "claude", "claude-code", "development", "process-manager", "dev-server"],
+  "author": "Brennan Cheung",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brennancheung/mcp-rewatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/brennancheung/mcp-rewatch/issues"
+  },
+  "homepage": "https://github.com/brennancheung/mcp-rewatch#readme",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "rewatch.config.example.json"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.9",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "processes": {
+    "convex": {
+      "command": "pnpm",
+      "args": ["dlx", "convex", "dev"],
+      "cwd": "./",
+      "startupDelay": 5000
+    },
+    "nextjs": {
+      "command": "pnpm",
+      "args": ["dev"],
+      "cwd": "./",
+      "env": {
+        "PORT": "3000"
+      },
+      "startupDelay": 4000
+    }
+  }
+}
