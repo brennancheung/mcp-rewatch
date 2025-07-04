@@ -110,12 +110,63 @@ The `startupDelay` should be tuned based on your specific processes:
 
 ### Configuration Options
 
+#### Process Configuration
 - **command**: The executable to run (e.g., `npm`, `pnpm`, `node`)
 - **args**: Array of command arguments
 - **cwd**: Working directory for the process (relative to where MCP server runs, i.e., your project root)
 - **env**: Additional environment variables (optional)
 - **startupDelay**: Time in milliseconds to wait after starting before checking status (default: 3000)
 - **readyPattern**: (Not implemented yet - see roadmap)
+
+#### Observer Configuration (Optional)
+
+The observer feature allows you to send all process logs to an external monitoring service for real-time viewing in a web UI.
+
+**Configuration options:**
+- **observer.url**: Base URL of the rewatch-observer server
+- **observer.port**: Port number of the rewatch-observer server (optional if URL includes port)
+
+**Example with observer:**
+```json
+{
+  "processes": {
+    "frontend": {
+      "command": "npm",
+      "args": ["run", "dev"],
+      "cwd": "./frontend"
+    },
+    "backend": {
+      "command": "npm", 
+      "args": ["run", "dev"],
+      "cwd": "./backend"
+    }
+  },
+  "observer": {
+    "url": "http://localhost",
+    "port": 4000
+  }
+}
+```
+
+**Alternative configuration (URL with port):**
+```json
+{
+  "processes": {
+    // ... your processes
+  },
+  "observer": {
+    "url": "http://localhost:4000"
+  }
+}
+```
+
+When configured, MCP Rewatch will send all process logs to a [rewatch-observer](https://github.com/brennancheung/rewatch-observer) instance. This enables:
+- Real-time log viewing in a web interface
+- Color-coded lanes for different processes
+- Live updates via Server-Sent Events
+- Simultaneous debugging across multiple services
+
+If the observer section is omitted, MCP Rewatch functions normally with logs stored in memory.
 
 ## Usage with Claude Code
 
@@ -307,3 +358,11 @@ claude mcp add rewatch-dev node -- /path/to/mcp-rewatch/dist/index.js
 ```
 
 Then create a `rewatch.config.json` in whatever directory you're testing from.
+
+## Contributors
+
+- [Brennan Cheung](https://github.com/brennancheung) - Creator and maintainer
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.

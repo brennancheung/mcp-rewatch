@@ -1,57 +1,54 @@
-export class LogBuffer {
-  private buffer: string[] = []
-  private maxLines: number
-  private readonly maxLineLength = 5000
+export interface LogBuffer {
+  addLine: (line: string) => void
+  getLines: (count?: number) => string[]
+  clear: () => void
+  getLength: () => number
+}
 
-  constructor(maxLines: number = 10000) {
-    this.maxLines = maxLines
-  }
+export const createLogBuffer = (maxLines = 10000): LogBuffer => {
+  const buffer: string[] = []
+  const maxLineLength = 5000
 
-  add(line: string): void {
+  const addLine = (line: string): void => {
     try {
-      // Truncate extremely long lines to prevent memory issues
-      const truncatedLine = line.length > this.maxLineLength 
-        ? line.substring(0, this.maxLineLength) + '... (truncated)'
+      const truncatedLine = line.length > maxLineLength 
+        ? line.substring(0, maxLineLength) + '... (truncated)'
         : line
       
       const timestamp = new Date().toISOString()
-      this.buffer.push(`[${timestamp}] ${truncatedLine}`)
+      buffer.push(`[${timestamp}] ${truncatedLine}`)
       
-      // Remove multiple lines if buffer is significantly over limit
-      if (this.buffer.length > this.maxLines) {
-        const excess = this.buffer.length - this.maxLines
-        this.buffer.splice(0, Math.max(1, excess))
+      if (buffer.length > maxLines) {
+        const excess = buffer.length - maxLines
+        buffer.splice(0, Math.max(1, excess))
       }
     } catch (error) {
-      // Fallback if timestamp generation or other operations fail
       try {
-        this.buffer.push(`[error] Failed to add log: ${error instanceof Error ? error.message : 'unknown error'}`)
-        // Ensure we don't exceed limits even in error case
-        if (this.buffer.length > this.maxLines) {
-          this.buffer.shift()
-        }
+        const errorMessage = `[error] Failed to add log: ${error instanceof Error ? error.message : 'unknown error'}`
+        buffer.push(errorMessage)
+        
+        if (buffer.length > maxLines) buffer.shift()
       } catch {
-        // If even error logging fails, just ensure buffer doesn't grow unbounded
-        if (this.buffer.length > this.maxLines) {
-          this.buffer.shift()
-        }
+        if (buffer.length > maxLines) buffer.shift()
       }
     }
   }
 
-  getLines(count?: number): string[] {
-    if (!count) {
-      return [...this.buffer]
-    }
-    
-    return this.buffer.slice(-count)
+  const getLines = (count?: number): string[] => {
+    if (!count) return [...buffer]
+    return buffer.slice(-count)
   }
 
-  clear(): void {
-    this.buffer = []
+  const clear = (): void => {
+    buffer.length = 0
   }
 
-  get length(): number {
-    return this.buffer.length
+  const getLength = (): number => buffer.length
+
+  return {
+    addLine,
+    getLines,
+    clear,
+    getLength
   }
 }

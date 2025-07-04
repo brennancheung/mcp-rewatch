@@ -15,5 +15,9 @@
       },
       "startupDelay": 4000
     }
+  },
+  "observer": {
+    "url": "http://localhost",
+    "port": 4000
   }
 }

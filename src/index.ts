@@ -3,8 +3,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { ProcessManager } from './process-manager'
+import { createProcessManager, ProcessManager } from './process-manager'
 import { Config } from './types'
+import { createObserverLogger } from './observer-logger'
 import { readFileSync, existsSync } from 'fs'
 import { resolve } from 'path'
 
@@ -15,10 +16,84 @@ const server = new McpServer({
 
 let processManager: ProcessManager
 
-function loadConfig(): Config {
+// Validation utilities
+const isValidProcessName = (name: unknown): name is string => 
+  typeof name === 'string' && name.trim().length > 0
+
+const isValidLineCount = (lines: unknown): boolean =>
+  typeof lines === 'number' && lines >= 1 && lines <= 10000 && Number.isInteger(lines)
+
+const isProcessConfigValid = (config: unknown): boolean =>
+  config !== null && 
+  typeof config === 'object' && 
+  'command' in config &&
+  typeof (config as any).command === 'string'
+
+const hasValidProcesses = (config: any): boolean =>
+  config.processes && typeof config.processes === 'object'
+
+// Error handling utilities
+const handleConfigError = (error: unknown): never => {
+  if (error instanceof SyntaxError) {
+    console.error('Invalid JSON in rewatch.config.json:', error.message)
+    process.exit(1)
+  }
+  
+  if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+    console.error('Permission denied reading rewatch.config.json')
+    process.exit(1)
+  }
+  
+  console.error('Failed to load config:', error instanceof Error ? error.message : error)
+  process.exit(1)
+}
+
+const isConnectionError = (error: unknown): boolean => {
+  const errorCode = (error as NodeJS.ErrnoException).code
+  return errorCode === 'EPIPE'
+}
+
+const isTransportError = (error: unknown): boolean =>
+  error instanceof Error && error.message.includes('transport')
+
+// Response builders
+const buildErrorResponse = (message: string) => ({
+  content: [{
+    type: 'text' as const,
+    text: message
+  }]
+})
+
+const buildSuccessResponse = (message: string) => ({
+  content: [{
+    type: 'text' as const,
+    text: message
+  }]
+})
+
+const buildProcessNotFoundError = (name: string, availableProcesses: string[]) =>
+  buildErrorResponse(`Error: Process '${name}' not found. Available processes: ${availableProcesses.join(', ') || 'none'}`)
+
+// Process message builders
+const buildRestartMessage = (name: string, success: boolean, logs: string[]): string => {
+  let message = `Process '${name}' `
+  message += success ? 'started successfully\n\n' : 'failed to start or exited early\n\n'
+  message += success ? 'Initial logs:\n' : 'Logs:\n'
+  message += logs.length > 0 ? logs.join('\n') : (success ? 'No output yet' : 'No output captured')
+  return message
+}
+
+const buildProcessListLine = (name: string, status: string, pid?: number, error?: string): string => {
+  let line = `${name}: ${status}`
+  if (pid) line += ` (PID: ${pid})`
+  if (error) line += ` - Error: ${error}`
+  return line
+}
+
+// Config loading
+const loadConfig = (): Config => {
   const configPath = resolve(process.cwd(), 'rewatch.config.json')
   
-  // Check if config file exists
   if (!existsSync(configPath)) {
     console.error(`Configuration file not found at: ${configPath}`)
     console.error('Please create a rewatch.config.json file. See rewatch.config.example.json for reference.')
@@ -29,42 +104,37 @@ function loadConfig(): Config {
     const configContent = readFileSync(configPath, 'utf-8')
     const parsed = JSON.parse(configContent)
     
-    // Validate config structure
-    if (!parsed.processes || typeof parsed.processes !== 'object') {
-      throw new Error('Invalid config: "processes" must be an object')
-    }
+    if (!hasValidProcesses(parsed)) throw new Error('Invalid config: "processes" must be an object')
     
-    // Validate each process config
     for (const [name, processConfig] of Object.entries(parsed.processes)) {
-      if (!processConfig || typeof processConfig !== 'object') {
-        throw new Error(`Invalid process config for "${name}": must be an object`)
-      }
-      const config = processConfig as any
-      if (!config.command || typeof config.command !== 'string') {
-        throw new Error(`Invalid process config for "${name}": "command" is required and must be a string`)
+      if (!isProcessConfigValid(processConfig)) {
+        throw new Error(`Invalid process config for "${name}": must be an object with a command string`)
       }
     }
     
     return parsed
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      console.error('Invalid JSON in rewatch.config.json:', error.message)
-    } else if ((error as any).code === 'EACCES') {
-      console.error('Permission denied reading rewatch.config.json')
-    } else {
-      console.error('Failed to load config:', error instanceof Error ? error.message : error)
-    }
-    process.exit(1)
+    return handleConfigError(error)
   }
 }
 
-// Load config and initialize process manager when server starts
+// Initialize
 console.error('Loading configuration from:', resolve(process.cwd(), 'rewatch.config.json'))
 const config = loadConfig()
 console.error(`Loaded ${Object.keys(config.processes).length} process configuration(s):`, Object.keys(config.processes).join(', '))
-processManager = new ProcessManager(config.processes)
 
-// Register tools
+const observerLogger = createObserverLogger(config)
+if (observerLogger.isEnabled()) {
+  console.error('Observer logging enabled')
+  observerLogger.logSystem('info', 'MCP Rewatch server started', { 
+    processes: Object.keys(config.processes),
+    configPath: resolve(process.cwd(), 'rewatch.config.json')
+  })
+}
+
+processManager = createProcessManager(config.processes, observerLogger)
+
+// Tool registrations
 server.registerTool(
   'restart_process',
   {
@@ -76,60 +146,18 @@ server.registerTool(
   },
   async ({ name }) => {
     try {
-      // Validate input
-      if (!name || typeof name !== 'string' || name.trim() === '') {
-        return {
-          content: [{
-            type: 'text',
-            text: 'Error: Process name must be a non-empty string'
-          }]
-        }
-      }
+      if (!isValidProcessName(name)) return buildErrorResponse('Error: Process name must be a non-empty string')
       
-      // Check if process exists
       const processes = processManager.listProcesses()
       const processNames = processes.map(p => p.name)
-      if (!processNames.includes(name)) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: Process '${name}' not found. Available processes: ${processNames.join(', ') || 'none'}`
-          }]
-        }
-      }
+      if (!processNames.includes(name)) return buildProcessNotFoundError(name, processNames)
       
       const result = await processManager.restart(name)
+      const message = buildRestartMessage(name, result.success, result.logs)
       
-      let message = `Process '${name}' `
-      if (result.success) {
-        message += 'started successfully\n\n'
-        message += 'Initial logs:\n'
-        message += result.logs.length > 0 
-          ? result.logs.join('\n') 
-          : 'No output yet'
-      } else {
-        message += 'failed to start or exited early\n\n'
-        message += 'Logs:\n'
-        message += result.logs.length > 0 
-          ? result.logs.join('\n') 
-          : 'No output captured'
-      }
-      
-      return {
-        content: [
-          {
-            type: 'text',
-            text: message
-          }
-        ]
-      }
+      return buildSuccessResponse(message)
     } catch (error) {
-      return {
-        content: [{
-          type: 'text',
-          text: `Error restarting process '${name}': ${error instanceof Error ? error.message : String(error)}`
-        }]
-      }
+      return buildErrorResponse(`Error restarting process '${name}': ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 )
@@ -146,56 +174,20 @@ server.registerTool(
   },
   async ({ name, lines }) => {
     try {
-      // Validate name
-      if (!name || typeof name !== 'string' || name.trim() === '') {
-        return {
-          content: [{
-            type: 'text',
-            text: 'Error: Process name must be a non-empty string'
-          }]
-        }
+      if (!isValidProcessName(name)) return buildErrorResponse('Error: Process name must be a non-empty string')
+      
+      if (lines !== undefined && !isValidLineCount(lines)) {
+        return buildErrorResponse('Error: lines must be an integer between 1 and 10000')
       }
       
-      // Validate lines parameter if provided
-      if (lines !== undefined) {
-        if (typeof lines !== 'number' || lines < 1 || lines > 10000 || !Number.isInteger(lines)) {
-          return {
-            content: [{
-              type: 'text',
-              text: 'Error: lines must be an integer between 1 and 10000'
-          }]
-          }
-        }
-      }
-      
-      // Check if process exists
       const processes = processManager.listProcesses()
       const processNames = processes.map(p => p.name)
-      if (!processNames.includes(name)) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: Process '${name}' not found. Available processes: ${processNames.join(', ') || 'none'}`
-          }]
-        }
-      }
+      if (!processNames.includes(name)) return buildProcessNotFoundError(name, processNames)
       
       const logs = processManager.getLogs(name, lines)
-      return {
-        content: [
-          {
-            type: 'text',
-            text: logs.length > 0 ? logs.join('\n') : 'No logs available'
-          }
-        ]
-      }
+      return buildSuccessResponse(logs.length > 0 ? logs.join('\n') : 'No logs available')
     } catch (error) {
-      return {
-        content: [{
-          type: 'text',
-          text: `Error retrieving logs: ${error instanceof Error ? error.message : String(error)}`
-        }]
-      }
+      return buildErrorResponse(`Error retrieving logs: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 )
@@ -210,21 +202,9 @@ server.registerTool(
   async () => {
     try {
       await processManager.stopAll()
-      return {
-        content: [
-          {
-            type: 'text',
-            text: 'All processes stopped'
-          }
-        ]
-      }
+      return buildSuccessResponse('All processes stopped')
     } catch (error) {
-      return {
-        content: [{
-          type: 'text',
-          text: `Error stopping processes: ${error instanceof Error ? error.message : String(error)}`
-        }]
-      }
+      return buildErrorResponse(`Error stopping processes: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 )
@@ -239,90 +219,80 @@ server.registerTool(
   async () => {
     try {
       const processes = processManager.listProcesses()
-      const output = processes.map(p => {
-        let line = `${p.name}: ${p.status}`
-        if (p.pid) line += ` (PID: ${p.pid})`
-        if (p.error) line += ` - Error: ${p.error}`
-        return line
-      }).join('\n')
+      const output = processes
+        .map(p => buildProcessListLine(p.name, p.status, p.pid, p.error))
+        .join('\n')
       
-      return {
-        content: [
-          {
-            type: 'text',
-            text: output || 'No processes configured'
-          }
-        ]
-      }
+      return buildSuccessResponse(output || 'No processes configured')
     } catch (error) {
-      return {
-        content: [{
-          type: 'text',
-          text: `Error listing processes: ${error instanceof Error ? error.message : String(error)}`
-        }]
-      }
+      return buildErrorResponse(`Error listing processes: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 )
 
+// Main application
+const handleShutdown = async (signal: string) => {
+  console.error(`\\nReceived ${signal}, shutting down gracefully...`)
+  try {
+    await processManager.stopAll()
+    console.error('All processes stopped')
+  } catch (error) {
+    console.error('Error during shutdown:', error instanceof Error ? error.message : error)
+  }
+  process.exit(0)
+}
 
-async function main() {
+const performEmergencyCleanup = () => {
+  const processes = processManager.getProcesses()
+  for (const [name, managed] of processes) {
+    if (!managed.process || !managed.pid) continue
+    
+    try {
+      process.kill(process.platform !== 'win32' ? -managed.pid : managed.pid, 'SIGKILL')
+    } catch (e) {
+      // Ignore errors during emergency cleanup
+    }
+  }
+}
+
+const handleStartupError = async (error: unknown) => {
+  if (isConnectionError(error)) {
+    console.error('Lost connection to MCP client')
+    await attemptCleanup()
+    process.exit(1)
+  }
+  
+  if (isTransportError(error)) {
+    console.error('Failed to establish MCP transport:', (error as Error).message)
+    await attemptCleanup()
+    process.exit(1)
+  }
+  
+  console.error('Fatal error during startup:', error instanceof Error ? error.message : error)
+  await attemptCleanup()
+  process.exit(1)
+}
+
+const attemptCleanup = async () => {
+  try {
+    await processManager?.stopAll()
+  } catch (cleanupError) {
+    console.error('Error during cleanup:', cleanupError instanceof Error ? cleanupError.message : cleanupError)
+  }
+}
+
+const main = async () => {
   try {
     const transport = new StdioServerTransport()
     await server.connect(transport)
     console.error('MCP Rewatch server started successfully')
     
-    // Handle shutdown gracefully
-    const shutdown = async (signal: string) => {
-      console.error(`\\nReceived ${signal}, shutting down gracefully...`)
-      try {
-        await processManager.stopAll()
-        console.error('All processes stopped')
-      } catch (error) {
-        console.error('Error during shutdown:', error instanceof Error ? error.message : error)
-      }
-      process.exit(0)
-    }
-    
-    process.on('SIGTERM', () => shutdown('SIGTERM'))
-    process.on('SIGINT', () => shutdown('SIGINT'))
-    
-    // Also handle unexpected exits
-    process.on('exit', () => {
-      // Synchronously try to kill all processes
-      const processes = processManager.getProcesses()
-      for (const [name, managed] of processes) {
-        if (managed.process && managed.pid) {
-          try {
-            if (process.platform !== 'win32') {
-              process.kill(-managed.pid, 'SIGKILL')
-            } else {
-              process.kill(managed.pid, 'SIGKILL')
-            }
-          } catch (e) {
-            // Ignore errors during emergency cleanup
-          }
-        }
-      }
-    })
+    process.on('SIGTERM', () => handleShutdown('SIGTERM'))
+    process.on('SIGINT', () => handleShutdown('SIGINT'))
+    process.on('exit', performEmergencyCleanup)
     
   } catch (error) {
-    if ((error as any).code === 'EPIPE') {
-      console.error('Lost connection to MCP client')
-    } else if (error instanceof Error && error.message.includes('transport')) {
-      console.error('Failed to establish MCP transport:', error.message)
-    } else {
-      console.error('Fatal error during startup:', error instanceof Error ? error.message : error)
-    }
-    
-    // Attempt cleanup
-    try {
-      await processManager?.stopAll()
-    } catch (cleanupError) {
-      console.error('Error during cleanup:', cleanupError instanceof Error ? cleanupError.message : cleanupError)
-    }
-    
-    process.exit(1)
+    await handleStartupError(error)
   }
 }
 

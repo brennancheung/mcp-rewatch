@@ -13,6 +13,10 @@ export interface ProcessesConfig {
 
 export interface Config {
   processes: ProcessesConfig
+  observer?: {
+    url?: string
+    port?: number
+  }
 }
 
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'error'
